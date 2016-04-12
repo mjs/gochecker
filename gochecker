@@ -1,0 +1,160 @@
+#!/usr/bin/python
+
+"""\
+Some examples of how gochecker converts its args to `go test` command lines:
+
+  gochecker                         : go test ./...
+  gochecker -v ...                  : go test -v ./... -gocheck.v
+  gochecker -v foo                  : go test -v ./foo -gocheck.v
+  gochecker -v foo/...              : go test -v ./foo/... -gocheck.v
+  gochecker -vv foo                 : go test -v ./foo -gocheck.vv
+  gochecker foo:SomeSuite           : go test ./foo -gocheck.f SomeSuite
+  gochecker foo:SomeSuite.TestThing : go test ./foo -gocheck.f SomeSuite.TestThing
+  gochecker --race foo              : go test -r ./foo
+
+Testing across multiple packages is also supported. For example:
+
+  gochecker foo bar:SomeSuite some/other/package
+
+All output is recorded to a gochecker-*.out files. The last 3 output
+files are kept.
+
+By default, logger output to the console is suppressed, but will be
+available in the output files. To see logger output at the console
+pass --logs or -l.
+"""
+
+from datetime import datetime
+import argparse
+import glob
+import os
+import subprocess as subp
+import sys
+
+
+OUTPUT_FILES_TO_KEEP = 3
+OUTPUT_FILE_PREFIX="gochecker-"
+OUTPUT_FILE_PATTERN = OUTPUT_FILE_PREFIX + '*.out'
+LOG_PREFIX = '[LOG] '
+
+
+def main():
+    args = process_command_line()
+
+    remove_old_output_files()
+    output_filename = next_output_filename()
+    print "Recording output in", output_filename
+
+    with open(output_filename, 'w') as output_file:
+        stdout = FlushedFile(sys.stdout) if args.logs else LogFilterFile(sys.stdout)
+        for target in args.targets:
+            gotest_args = generate_gotest_args(target, args.verbose, args.race)
+            print "running", " ".join(gotest_args)
+            for line in run_and_capture_output(gotest_args):
+                stdout.write(line)
+                output_file.write(line)
+
+
+def process_command_line():
+    parser = argparse.ArgumentParser(
+        description='A frontend for `go test` and gocheck.',
+        epilog=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('targets', nargs='*', default=None,
+                        help="Directory, package, suite and/or test to run. "
+                        "By default, all tests will be run recursively from "
+                        "the current directory.")
+    parser.add_argument('-v', '--verbose', action="count",
+                        help="Verbose test output (use twice for extra effect)")
+    parser.add_argument('-l', '--logs', action="store_true", default=False,
+                        help="Show log output when tests fail")
+    parser.add_argument('-r', '--race', action="store_true", default=False,
+                        help="Enable race detector")
+    args = parser.parse_args()
+
+    if not args.targets:
+        args.targets = [None]
+
+    return args
+
+
+def get_go_bin():
+    return os.environ.get("GO_BIN", "go")
+
+
+def generate_gotest_args(target, verbose, race):
+    test_path, test_target = parse_target(target)
+    args = [get_go_bin(), 'test']
+    if verbose > 0:
+        args.append('-v')
+    if test_path:
+        args.append(test_path)
+    if verbose == 1:
+        args.append('-gocheck.v')
+    elif verbose > 1:
+        args.append('-gocheck.vv')
+    if race:
+        args.append('-race')
+    if test_target:
+        args.extend(['-gocheck.f', test_target])
+    return args
+
+
+def parse_target(target):
+    if not target:
+        return './...', None
+
+    parts = target.split(':', 1)
+    if len(parts) == 2:
+        test_path, test_target = parts
+    else:
+        test_path, test_target = parts[0], None
+
+    if test_path and not test_path.startswith('./'):
+        test_path = './' + test_path
+
+    return test_path, test_target
+
+
+def next_output_filename():
+    return datetime.now().strftime(OUTPUT_FILE_PREFIX + "%Y%m%d%H%M%S.out")
+
+
+def remove_old_output_files():
+    filenames = glob.glob(OUTPUT_FILE_PATTERN)
+    filenames.sort()
+    for filename in filenames[:-OUTPUT_FILES_TO_KEEP+1]:
+        os.unlink(filename)
+
+
+def run_and_capture_output(args):
+    proc = subp.Popen(args, stdout=subp.PIPE, stderr=subp.STDOUT, bufsize=0)
+    while True:
+        # Avoid buffering in the stdout iterator by calling readline
+        # directly.
+        line = proc.stdout.readline()
+        if not line:
+            break
+        yield line
+
+
+class FlushedFile(object):
+
+    def __init__(self, outfile):
+        self.outfile = outfile
+
+    def write(self, data):
+        self.outfile.write(data)
+        self.outfile.flush()
+
+
+class LogFilterFile(FlushedFile):
+
+    def write(self, line):
+        if not line.startswith(LOG_PREFIX):
+            FlushedFile.write(self, line)
+
+
+if __name__ == '__main__':
+    main()
