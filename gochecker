@@ -47,9 +47,10 @@ def main():
 
     with open(output_filename, 'w') as output_file:
         stdout = FlushedFile(sys.stdout) if args.logs else LogFilterFile(sys.stdout)
+        install_test_deps(args.targets, stdout)
         for target in args.targets:
             gotest_args = generate_gotest_args(target, args.verbose, args.race)
-            print "running", " ".join(gotest_args)
+            stdout.write("running: {}\n".format(" ".join(gotest_args)))
             for line in run_and_capture_output(gotest_args):
                 stdout.write(line)
                 output_file.write(line)
@@ -77,6 +78,14 @@ def process_command_line():
         args.targets = [None]
 
     return args
+
+
+def install_test_deps(targets, stdout):
+    args = [get_go_bin(), "test", "-i"]
+    args.extend(parse_target(target)[0] for target in targets)
+    stdout.write("running: {}\n".format(" ".join(args)))
+    for line in run_and_capture_output(args):
+        stdout.write(line)
 
 
 def get_go_bin():
